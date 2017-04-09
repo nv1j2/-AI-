@@ -4,7 +4,7 @@
 
 /*******************************************************************************
 
-http://ielashi.com/el-tetris-an-improvement-on-pierre-dellacheries-algorithm/
+
 
 改进的Pierre Dellacherie算法：（只考虑当前方块）
 
