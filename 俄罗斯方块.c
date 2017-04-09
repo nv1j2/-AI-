@@ -5,8 +5,8 @@
 #include <string.h>
 
 #define gotoxyPoolWidth 12      //游戏池左侧宽度
-#define poolWidth 15           //游戏池宽度 包括边框
-#define poolHidth 22           //游戏池高度
+#define poolWidth 14           //游戏池宽度 包括左右边框各1,实际宽度为12
+#define poolHidth 27           //游戏池高度 包括下边框1和上部分方块显示区域x4,实际高度为22
 
 HANDLE  hConsole;// 控制台输出句柄
 
@@ -26,6 +26,7 @@ static const bool tetrisBox[7][8]={  //存储方块形状
 	{0,1,1,0,
 	 1,1,0,0} // S型方块
 };
+
 typedef struct{
 	int eliminateLineNum[4];//消除行数统计
 	int tetrisBoxType[7];//方块类型统计
@@ -49,14 +50,26 @@ typedef struct gameManager{
 	int SSboxShape;//上上个方块形状
 } gameManager;
 
+typedef struct autoPlayWay{//AI摆法
+    bool pool[4][4];//游戏池
+    bool saveMove[poolWidth][poolHidth];//记录AI走过的位置,只有旋转过才算走过
+    int rotateFrequency;//旋转次数，不同方块旋转次数不同
+    int moveWay[100];//AI操作路径;72(上)为旋转,75(左)为左移,77(右)为右移,80(下)为下移,32(空格)为直接落地,最大操作数为100,0终止;PS:这里其实使用栈更好,不过麻,这里数据很简单,就懒得创建栈了。
+    int boxX;//记录原来的X坐标
+    int saveMoveX[poolHidth-1];//记录移动Y时的X坐标,作用相当于栈
+    int boxY;//记录原来的Y坐标
+    int value;//估值
+    int priority;//优先级
+}autoPlayWay;
+
 void gotoxy(int x,int y,int z);              //改变光标位置函数
 void printPlayBorder();  // 显示游戏池边界
 void startGameInfo(gameManager *manager,gameMainData *mainData); //初始化游戏信息
 int  rollOneNum(int num);  //随机一个数，包括0
 void startRunBoxGame(gameManager *manager,gameMainData *mainData); //游戏更新开始信息
-void printRunBoxGame(gameManager *manager,int printcolor); //显示游戏运行时方块
+void printRunBoxGame(gameManager *manager,int printColor); //显示游戏运行时方块
 void removePoolTetris(gameManager *manager);    //移除游戏池当前方块显示
-void rotateTetris(gameManager *manager);   //旋转方块
+void rotatePoolTetris(gameManager *manager,bool v,bool u);   //旋转游戏池方块;bool,v为1进行碰撞检测且顺时针旋转,v为0不进行碰撞检测且逆时针旋转
 bool checkCollision(gameManager *manager,bool v); // 旋转碰撞检测,返回1为碰撞,0为没碰撞,后面bool:1为旋转,bool:0为非旋转
 void keyControl(gameManager *manager,int key,gameMainData *mainData);//按键
 void dropDownTetris(gameManager *manager,gameMainData *mainData);//方块落地
@@ -77,8 +90,23 @@ void drawBorder();//GDI绘图绘边框
 void drawELSFK();//画出俄罗斯方块的星阵
 void gameHelp();//游戏帮助说明
 void printfGameData(gameMainData *mainData);//输出显示数据排名
+void autoPlay(gameManager *manager,gameMainData *mainData);//挂载AI,自动运行
+int evaluate(gameManager *manager);//AI;估值
+int landingHeight(gameManager *manager);//AI;下落高度
+int eliminateRows(gameManager *manager);//AI;消行数*当前落子被消取的格子数
+int boardRowTransitions(gameManager *manager);//AI;行变换
+int boardColTransitions(gameManager *manager);//AI;列变换
+int buriehHoles(gameManager *manager);//AI;空洞
+int wells(gameManager *manager);//AI;井
+void existencePlace(gameManager *manager,autoPlayWay *bestPlayWay);//AI;方块的存在位置
+bool routing(gameManager *manager,autoPlayWay *nowPlayWay,int v);//AI;寻径,非最佳路径,只要能够到达就行;深度递归;类似于二叉树中序遍历;v为递归层次;
+bool pooltest(gameManager *manager,autoPlayWay *nowPlayWay);//AI;游戏池检测;游戏池检测,相同返回0,不同返回1;
+void changeMoveWay(const gameManager *manager,autoPlayWay *bestPlayWay);//处理改变移动路径
 
+void easyAI(gameManager *manager,gameMainData *mainData);//临时简单AI
+void easyExistencePlace(gameManager *manager,autoPlayWay *bestPlayWay);//简单AI寻址
 
+/*或许有人会说我这个代码格式看起来有些不大众规范，代码比较紧密，不过我觉得这样更容易看出代码之间的规律，有利于我个人的效率，而且我也是练练手*/
 void startGameInfo(gameManager *manager,gameMainData *mainData){  //初始化游戏信息
 	manager->SboxShape=rollOneNum(14)/2;//上个方块形状      不这样会使得两个随机数总是相同
 	manager->SSboxShape=rollOneNum(21)/3;//上上个方块形状
@@ -122,9 +150,9 @@ void printPlayBorder(){// 显示游戏池边界
 		printf("■");
 	}
 	SetConsoleTextAttribute(hConsole, 0x0c); //设置颜色
-		gotoxy(gotoxyPoolWidth,3,2);
+		gotoxy(gotoxyPoolWidth,4,2);
 		printf("■");
-		gotoxy(gotoxyPoolWidth+poolWidth-1,3,2);
+		gotoxy(gotoxyPoolWidth+poolWidth-1,4,2);
 		printf("■");
 	SetConsoleTextAttribute(hConsole, 0xf0); //设置颜色
 		gotoxy(2,1,1);
@@ -154,8 +182,8 @@ void startRunBoxGame(gameManager *manager,gameMainData *mainData){//游戏更新
 	int i,j;
 	tetrisBoxGameDead(manager);//游戏死亡判断
 	SetConsoleTextAttribute(hConsole,0xff); //设置颜色
-	for(i=0;i<4;i++)for(j=0;j<2;j++){gotoxy(35+i,2+j,2);printf("■");}//将上上个方块区域清空
-	for(i=0;i<4;i++)for(j=0;j<2;j++){gotoxy(29+i,2+j,2);printf("■");}//将上个方块区域清空
+	for(i=0;i<4;i++)for(j=0;j<2;j++){gotoxy(gotoxyPoolWidth+poolWidth+8+i,2+j,2);printf("■");}//将上上个方块区域清空
+	for(i=0;i<4;i++)for(j=0;j<2;j++){gotoxy(gotoxyPoolWidth+poolWidth+2+i,2+j,2);printf("■");}//将上个方块区域清空
 	memset(manager->pool,0,sizeof(manager->pool));//初始化游戏池
 	manager->NowboxShape=manager->SboxShape;//将上个方块形状给当前方块
 	manager->SboxShape=manager->SSboxShape;//将上上个方块形状给上个方块
@@ -175,14 +203,14 @@ void printGameInfo(gameManager *manager,gameMainData *mainData){ //显示游戏�
 	for(i=0;i<4;i++)
 		for(j=0;j<2;j++)
 			if(tetrisBox[manager->SboxShape][i+(j*4)]==1){//显示上个方块
-			gotoxy(29+i,2+j,2);
+			gotoxy(gotoxyPoolWidth+poolWidth+2+i,2+j,2);
 	     	printf("■");
 			}	
 	SetConsoleTextAttribute(hConsole,241+manager->SSboxShape); //设置颜色
 	for(i=0;i<4;i++)
 		for(j=0;j<2;j++)
 			if(tetrisBox[manager->SSboxShape][i+(j*4)]==1){//显示上上个方块
-				gotoxy(35+i,2+j,2);
+				gotoxy(gotoxyPoolWidth+poolWidth+8+i,2+j,2);
 				printf("■");
 			}
 	SetConsoleTextAttribute(hConsole,0xf0); //设置颜色
@@ -195,8 +223,8 @@ void printGameInfo(gameManager *manager,gameMainData *mainData){ //显示游戏�
 	gotoxy(10,18,1);//显示统计总成绩
 	printf("%d",mainData->one.gameGrade);
 }
-void printRunBoxGame(gameManager *manager,int printcolor){       //显示游戏运行时方块
-	SetConsoleTextAttribute(hConsole,240+printcolor); //设置颜色
+void printRunBoxGame(gameManager *manager,int printColor){       //显示游戏运行时方块
+	SetConsoleTextAttribute(hConsole,240+printColor); //设置颜色
 	for(int i=0;i<4;i++)
 		for(int j=0;j<4;j++)
 			if(manager->pool[i][j]==1){
@@ -213,17 +241,33 @@ void removePoolTetris(gameManager *manager){    //移除游戏池当前方块显
 				printf("■");
 			}
 }
-void rotatePoolTetris(gameManager *manager){   //旋转游戏池方块
+void rotatePoolTetris(gameManager *manager,bool v,bool u){   //旋转游戏池方块;bool,v为1进行碰撞检测且顺时针旋转,v为0不进行碰撞检测且逆时针旋转
 	bool flashSaveBox[4][4];       //临时存储方块形状
 	int i,j;
 	for(i=0;i<4;i++)//保存原方块形状
 		for(j=0;j<4;j++)
 			flashSaveBox[i][j]=manager->pool[i][j];
 	memset(manager->pool,0,sizeof(manager->pool));//初始化游戏池
-	for(i=0;i<4;i++)//将方块旋转 顺时针
-		for(j=0;j<4;j++)
-			manager->pool[j][3-i]=flashSaveBox[i][j];
-
+	
+	if(u){
+		for(i=0;i<4;i++)//将方块旋转 顺时针
+			for(j=0;j<4;j++)
+	          manager->pool[j][3-i]=flashSaveBox[i][j];//将方块旋转 顺时针
+	}
+    else{
+		for(i=0;i<4;i++)//将方块旋转 顺时针
+			for(j=0;j<4;j++)
+				manager->pool[3-j][i]=flashSaveBox[i][j];//将方块旋转 逆时针
+		for(int m=0;m<3;m++)//进行右对其
+			if(manager->pool[0][0]||manager->pool[0][1]||manager->pool[0][2]||manager->pool[0][3])
+				break;
+			else
+				for(j=0;j<4;j++){
+					for(i=0;i<3;i++)
+						manager->pool[i][j]=manager->pool[i+1][j];
+					manager->pool[3][j]=0;
+				}
+	}
 	for(int l=0;l<3;l++)//进行上对其
 		if(manager->pool[0][0]||manager->pool[1][0]||manager->pool[2][0]||manager->pool[3][0])
 			break;
@@ -233,10 +277,13 @@ void rotatePoolTetris(gameManager *manager){   //旋转游戏池方块
 					manager->pool[i][j-1]=manager->pool[i][j];
 					manager->pool[i][3]=0;
 			}
-	if(checkCollision(manager,1))// 旋转碰撞检测,返回1为碰撞,0为没碰撞,后面bool:1为旋转,bool:0为非旋转
-		for(i=0;i<4;i++)//还原原方块形状
-			for(j=0;j<4;j++)
-				manager->pool[i][j]=flashSaveBox[i][j];
+	if(v){
+        if(checkCollision(manager,1)){// 旋转碰撞检测,返回1为碰撞,0为没碰撞,后面bool:1为旋转,bool:0为非旋转
+            for(i=0;i<4;i++)//还原原方块形状
+                for(j=0;j<4;j++)
+                    manager->pool[i][j]=flashSaveBox[i][j];
+        }
+    }
 }
 bool checkCollision(gameManager *manager,bool v){ // 旋转碰撞检测,返回1为碰撞,0为没碰撞,后面bool:1为旋转,bool:0为非旋转
 	bool u=1;
@@ -268,7 +315,7 @@ bool checkCollision(gameManager *manager,bool v){ // 旋转碰撞检测,返回1�
 void keyControl(gameManager *manager,int key,gameMainData *mainData){// 按键
 	removePoolTetris(manager);//移除游戏池当前方块显示
     switch(key){
-		case 72: rotatePoolTetris(manager);break; //上键，旋转游戏池方块
+		case 72: rotatePoolTetris(manager,1,1);break; //上键，旋转游戏池方块
 		case 75: --manager->NowboxX;if(checkCollision(manager,0))++manager->NowboxX;break;  // 左键，水平左移动方块
 		case 77: ++manager->NowboxX;if(checkCollision(manager,0))--manager->NowboxX;break;  // 右键，水平右移动方块
 		case 80: ++manager->NowboxY;if(checkCollision(manager,0)){--manager->NowboxY;dropDownTetris(manager,mainData);}break;		// 下键	
@@ -279,16 +326,16 @@ void keyControl(gameManager *manager,int key,gameMainData *mainData){// 按键
 }
 void dropDownTetris(gameManager *manager,gameMainData *mainData){//方块落地
 	for(int i=0;i<4;i++)//将游戏池存储
-					for(int j=0;j<4;j++)
-						if(manager->pool[i][j])
-							manager->savePool[manager->NowboxX+i][manager->NowboxY+j]=manager->pool[i][j];
-				printRunBoxGame(manager,0);//显示游戏运行时方块
-				eliminateLine(manager,mainData);//消除行
-				startRunBoxGame(manager,mainData);//游戏更新开始信息
+		for(int j=0;j<4;j++)
+			if(manager->pool[i][j])
+				manager->savePool[manager->NowboxX+i][manager->NowboxY+j]=manager->pool[i][j];
+	printRunBoxGame(manager,0);//显示游戏运行时方块
+	eliminateLine(manager,mainData);//消除行
+	startRunBoxGame(manager,mainData);//游戏更新开始信息
 }
 void tetrisBoxGameDead(gameManager *manager){  //游戏死亡判断
 	for(int i=1;i<poolWidth-1;i++)
-		if(manager->savePool[i][2]){
+		if(manager->savePool[i][3]){
 			manager->gameDead=0;
 			break;
 		}
@@ -375,7 +422,7 @@ gameMainData *partion(gameMainData *mainData,gameMainData *lowList,gameMainData 
 		while(lowList!=highist&&highist->one.gameGrade<=lowList->one.gameGrade)highist=highist->prior;
 		strcpy(nameTemp,lowList->name);strcpy(lowList->name,highist->name);strcpy(highist->name,nameTemp);//交换姓名
 		dataTemp=lowList->one;lowList->one=highist->one;highist->one=dataTemp;//交换其他详细数据
-	  /*if(lowList==highist)return Ret->next;//这里我修改了超过20个小时，本来是打算只改变指针的来交换数据，然后封装好方便以后使用，结果却仅仅证明，快速排序是不能这样的，否则会非常复杂，自己简直是找抽。以注释形式保留
+	  /*if(lowList==highist)return Ret->next;//。以注释形式保留
 		lowList->prior->next=highist;//因为头节点不参与排序，所以lowList的prior指针不会指向NULL
 		if(highist->next)highist->next->prior=lowList;//防止超出链表尾端
 		if(lowList->next==highist){
@@ -483,14 +530,16 @@ void runTetrisGame(gameManager *manager,gameMainData *mainData){//运行游戏
 			if(ch==27){//esc键,暂停
 				clockLast=0;
 				SetConsoleTextAttribute(hConsole,0x9f);
-				gotoxy(30,27,1);
+				gotoxy(28,27,1);
 				printf("游戏暂停,按任意键继续");
 				system("pause > nul");
 				SetConsoleTextAttribute(hConsole,0xf0);
-				gotoxy(30,27,1);
+				gotoxy(28,27,1);
 				printf("                      ");
 			}
-			if(ch=='Z'||ch=='z')return;
+			if(ch=='Z'||ch=='z')return;//返回退出
+			if(ch=='X'||ch=='x')autoPlay(manager,mainData);    //挂载AI
+			if(ch=='C'||ch=='c')easyAI(manager,mainData);//临时简单AI
 			keyControl(manager,ch,mainData); // 按键
 		}
 	clockNow=clock();  // 计时
@@ -502,6 +551,402 @@ void runTetrisGame(gameManager *manager,gameMainData *mainData){//运行游戏
 	scanfPlayerName(mainData);//初始化输入游戏玩家名
 	addGameDataSave(mainData);//存储游戏信息到文件,先存再读,这样原mainData作为头节点,数据将复制到链表结尾(未排序前)
 }
+
+
+int landingHeight(gameManager *manager){//AI;下落高度
+    float height;
+    height=(float)(poolHidth-manager->NowboxY-1);
+    for(int i=3;i>=0;i--){
+        for(int j=0;j<4;j++)
+            if(manager->pool[i][j])
+                return (int)((height-((float)i/2))*45);
+  }
+  return 0;//没有什么作用，减少警告
+}
+int eliminateRows(gameManager *manager){//AI;消行数*当前落子被消取的格子数
+    int eliNum=0;//消行数
+    int boxNum=0;//当前落子被消取的格子数
+    bool v;
+    for(int i=0;i<4;i++)//将游戏池存储
+		for(int j=0;j<4;j++)
+			if(manager->pool[i][j])
+							manager->savePool[manager->NowboxX+i][manager->NowboxY+j]=manager->pool[i][j];
+    for(int m=0;m<4;m++){
+    v=1;
+    if(m+manager->NowboxY+1==poolHidth)break;//防止超出边界
+    for(int n=1;n<poolWidth-1;n++)//判断是否有消除
+		if(!manager->savePool[n][manager->NowboxY+m])
+			v=0;
+	if(v){//如果有消除
+        ++eliNum;
+		for(int p=1;p<poolWidth-1;p++)
+			for(int q=manager->NowboxY+i;q>1;q--)
+				manager->savePool[p][q]=manager->savePool[p][q-1];
+		for(int u=0;u<4;u++)
+            if(manager->pool[m][u])
+                boxNum++;
+	}
+  }
+  return eliNum*boxNum*34;
+}
+int boardRowTransitions(gameManager *manager){//AI;行变换
+    int rowTran=0;
+    for(int i=4;i<poolHidth-1;i++)
+        for(int j=0;j<poolWidth-1;j++)
+            if(manager->savePool[j][i]!=manager->savePool[j+1][i])
+                rowTran++;
+    return rowTran*32;
+}
+int boardColTransitions(gameManager *manager){//AI;列变换
+    int colTran=0;
+    bool v=1;
+    for(int i=1;i<poolWidth-1;i++)
+        for(int j=4;j<poolHidth;j++)
+            if(manager->savePool[i][j]!=v){
+                colTran++;
+                v=manager->savePool[i][j];
+            }
+    return colTran*93;
+}
+int buriehHoles(gameManager *manager){//AI;空洞
+    int cavity=0;
+    for(int i=1;i<poolWidth-1;i++){
+        for(int j=4;j<poolHidth-1;j++)
+            if(manager->savePool[i][j])
+                break;
+        while(j<poolHidth-1){
+            if(!manager->savePool[i][j])
+                cavity++;
+            j++;
+        }
+    }
+    return cavity*79;
+}
+int wells(gameManager *manager){//AI;井
+    int wellNum=0,wellDepth=0;
+    static const int wellDepthTable[29]={0, 1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 66, 78,91, 
+    105, 120, 136, 153, 171, 190, 210, 231, 253,276, 300, 325, 351, 378, 406};//井的深度权值
+    for(int i=1;i<poolWidth-1;i++)
+        for(int j=4;j<poolHidth;j++)
+            if(!manager->savePool[i][j]){
+                if(manager->savePool[i-1][j]&&manager->savePool[i+1][j])
+                    wellDepth++;
+            }
+            else {
+                wellNum += wellDepthTable[wellDepth];
+                wellDepth=0;
+            }
+    return wellNum*34;
+}
+int evaluate(gameManager *manager){//AI;估值
+/*使用改进的Pierre Dellacherie,（只考虑当前方块）数据参考:http://tieba.baidu.com/p/2078306985 @wohaaitinciu
+	http://ielashi.com/el-tetris-an-improvement-on-pierre-dellacheries-algorithm/
+	部分思路参考:湖北大学_工程硕士学位论文_2011_余颖;基于神经网络和遗传算法的人工智能游戏研究与应用;*/
+    int value=0;
+    value -=landingHeight(manager);  // 下落高度,方块中点距底部的方格数;权值-4.500158825082766
+    value +=eliminateRows(manager);//消行数*当前落子被消取的格子数;权值3.4181268101392694
+    value -=boardRowTransitions(manager);//行变换;权值-3.2178882868487753
+    value -=boardColTransitions(manager);//列变换;权值-9.348695305445199
+    value -=buriehHoles(manager);//空洞;权值-7.899265427351652
+    value -=wells(manager);//井;权值-3.3855972247263626
+  return value;
+}
+
+bool pooltest(gameManager *manager,autoPlayWay *nowPlayWay){//AI;游戏池检测;游戏池检测,相同返回1,不同返回0;
+    for(int i=0;i<4;i++)
+        for(int j=0;j<4;j++)
+            if(manager->pool[i][j]!=nowPlayWay->pool[i][j])
+                return 0;
+    return 1;
+}
+bool routing(gameManager *manager,autoPlayWay *nowPlayWay,int v){//AI;寻径,非最佳路径,只要能够到达就行;从目标坐标到原坐标,以减少递归次数;这里采用原创的流水算法;对每一层进行递归;
+    
+    nowPlayWay->saveMoveX[manager->NowboxY]=manager->NowboxX;//一旦Y坐标发生变化,记录其对应的X坐标。类似出入栈;目标方块上移
+    --manager->NowboxY;//目标方块上移
+    ++v;if(v>90)return 0;//对方块移动次数进行判定
+    if(((manager->NowboxY>=0))&&(!checkCollision(manager,0))){//碰撞检测,返回1为碰撞,0为没碰撞;
+        if(!nowPlayWay->saveMove[manager->NowboxX][manager->NowboxY]){
+            nowPlayWay->moveWay[v]=80;//向上
+            if((manager->NowboxX==nowPlayWay->boxX)&&(manager->NowboxY==nowPlayWay->boxY)&&(pooltest(manager,nowPlayWay))){nowPlayWay->moveWay[v+1]=0;return 1;}//验证是否达到原位置
+            if(routing(manager,nowPlayWay,v))return 1;//递归  
+            --v; 
+        }
+    }
+    else{
+        ++manager->NowboxY;//目标方块下移
+        --v;
+        for(int i=0;i<nowPlayWay->rotateFrequency;i++){
+            rotatePoolTetris(manager,0,0);//旋转,不进行旋转碰撞检测;放止manager->NowboxX的值被改变
+            ++v;if(v>90)return 0;//对方块移动次数进行判定
+            if(!nowPlayWay->saveMove[manager->NowboxX][manager->NowboxY]){//碰撞检测,返回1为碰撞,0为没碰撞
+                nowPlayWay->moveWay[v]=9;//旋转
+                if((manager->NowboxX==nowPlayWay->boxX)&&(manager->NowboxY==nowPlayWay->boxY)&&(pooltest(manager,nowPlayWay))){nowPlayWay->moveWay[v+1]=0;return 1;}//验证是否达到原位置
+                --manager->NowboxY;//目标方块上移
+                if(((manager->NowboxY>=0))&&(!checkCollision(manager,0))){//碰撞检测,返回1为碰撞,0为没碰撞;
+                    if(!nowPlayWay->saveMove[manager->NowboxX][manager->NowboxY]){
+                        ++manager->NowboxY;//目标方块返回下移
+                        if(routing(manager,nowPlayWay,v))return 1;//递归 
+                    }
+                    else ++manager->NowboxY;//目标方块返回下移
+                }
+                else ++manager->NowboxY;//目标方块返回下移
+            }
+            --v;
+        }
+        nowPlayWay->saveMove[manager->NowboxX][manager->NowboxY]=1;
+        return 0;
+    }
+           
+
+        manager->NowboxX=nowPlayWay->saveMoveX[manager->NowboxY];//读取X坐标位置;类似出栈
+        --manager->NowboxX;//目标方块左移
+        ++v;if(v>90)return 0;//对方块移动次数进行判定              
+        while(!(nowPlayWay->saveMove[manager->NowboxX][manager->NowboxY]||checkCollision(manager,0))){//碰撞检测,返回1为碰撞,0为没碰撞     
+            nowPlayWay->moveWay[v]=77;//向左   
+            if((manager->NowboxX==nowPlayWay->boxX)&&(manager->NowboxY==nowPlayWay->boxY)&&(pooltest(manager,nowPlayWay))){nowPlayWay->moveWay[v+1]=0;return 1;}//验证是否达到原位置
+            --manager->NowboxY;//目标方块上移
+                if(((manager->NowboxY>=0))&&(!checkCollision(manager,0))&&(!nowPlayWay->saveMove[manager->NowboxX][manager->NowboxY])){//碰撞检测,返回1为碰撞,0为没碰撞
+                ++manager->NowboxY;//目标方块返回下移
+                if(routing(manager,nowPlayWay,v))return 1;//递归 
+            }
+            else ++manager->NowboxY;//目标方块返回下移
+            
+            for(int j=0;j<nowPlayWay->rotateFrequency;j++){
+                rotatePoolTetris(manager,0,0);//旋转,不进行旋转碰撞检测;放止manager->NowboxX的值被改变
+                ++v;if(v>90)return 0;//对方块移动次数进行判定
+                if(!nowPlayWay->saveMove[manager->NowboxX][manager->NowboxY]){//碰撞检测,返回1为碰撞,0为没碰撞
+                    nowPlayWay->moveWay[v]=9;//旋转
+                    if((manager->NowboxX==nowPlayWay->boxX)&&(manager->NowboxY==nowPlayWay->boxY)&&(pooltest(manager,nowPlayWay))){nowPlayWay->moveWay[v+1]=0;return 1;}//验证是否达到原位置
+                    --manager->NowboxY;//目标方块上移
+                    if(((manager->NowboxY>=0))&&(!checkCollision(manager,0))){//碰撞检测,返回1为碰撞,0为没碰撞;
+                        if(!nowPlayWay->saveMove[manager->NowboxX][manager->NowboxY]){
+                            ++manager->NowboxY;//目标方块返回下移
+                            if(routing(manager,nowPlayWay,v))return 1;//递归 
+                        }
+                        else ++manager->NowboxY;//目标方块返回下移
+                    }
+                    else ++manager->NowboxY;//目标方块返回下移
+                }
+                --v;
+            }
+            nowPlayWay->saveMove[manager->NowboxX][manager->NowboxY]=1;            
+            --manager->NowboxX;//目标方块左移
+            ++v;if(v>90)return 0;//对方块移动次数进行判定   
+        }
+        v-=(nowPlayWay->saveMoveX[manager->NowboxY]-manager->NowboxX);
+        
+        manager->NowboxX=nowPlayWay->saveMoveX[manager->NowboxY];//读取X坐标位置;类似出栈
+        ++manager->NowboxX;//目标方块右移
+        ++v;if(v>90)return 0;//对方块移动次数进行判定              
+        while(!(nowPlayWay->saveMove[manager->NowboxX][manager->NowboxY]||checkCollision(manager,0))){//碰撞检测,返回1为碰撞,0为没碰撞     
+            nowPlayWay->moveWay[v]=75;//向右   
+            if((manager->NowboxX==nowPlayWay->boxX)&&(manager->NowboxY==nowPlayWay->boxY)&&(pooltest(manager,nowPlayWay))){nowPlayWay->moveWay[v+1]=0;return 1;}//验证是否达到原位置  
+            --manager->NowboxY;//目标方块上移
+               if(((manager->NowboxY>=0))&&(!checkCollision(manager,0))&&(!nowPlayWay->saveMove[manager->NowboxX][manager->NowboxY])){//碰撞检测,返回1为碰撞,0为没碰撞
+               ++manager->NowboxY;//目标方块返回下移
+                if(routing(manager,nowPlayWay,v))return 1;//递归 
+            }
+            else ++manager->NowboxY;//目标方块返回下移
+            
+            for(int k=0;k<nowPlayWay->rotateFrequency;k++){
+                rotatePoolTetris(manager,0,0);//旋转,不进行旋转碰撞检测;放止manager->NowboxX的值被改变
+                ++v;if(v>90)return 0;//对方块移动次数进行判定
+                if(!nowPlayWay->saveMove[manager->NowboxX][manager->NowboxY]){//碰撞检测,返回1为碰撞,0为没碰撞
+                    nowPlayWay->moveWay[v]=9;//旋转
+                    if((manager->NowboxX==nowPlayWay->boxX)&&(manager->NowboxY==nowPlayWay->boxY)&&(pooltest(manager,nowPlayWay))){nowPlayWay->moveWay[v+1]=0;return 1;}//验证是否达到原位置
+                    --manager->NowboxY;//目标方块上移
+                    if(((manager->NowboxY>=0))&&(!checkCollision(manager,0))){//碰撞检测,返回1为碰撞,0为没碰撞;
+                        if(!nowPlayWay->saveMove[manager->NowboxX][manager->NowboxY]){
+                            ++manager->NowboxY;//目标方块返回下移
+                            if(routing(manager,nowPlayWay,v))return 1;//递归 
+                        }
+                        else ++manager->NowboxY;//目标方块返回下移
+                    }
+                    else ++manager->NowboxY;//目标方块返回下移
+                }
+                --v;
+            }
+            nowPlayWay->saveMove[manager->NowboxX][manager->NowboxY]=1;
+            ++manager->NowboxX;//目标方块右移
+            ++v;if(v>90)return 0;//对方块移动次数进行判定   
+            
+        }
+    v -=(manager->NowboxX-nowPlayWay->saveMoveX[manager->NowboxY]); 
+    ++manager->NowboxY;//目标方块返回下移
+    return 0;
+}
+
+
+
+void existencePlace(gameManager *manager,autoPlayWay *bestPlayWay){//AI;方块的存在位置
+    autoPlayWay nowPlayWay;
+    static gameManager backM;
+    int deltaX;//方块目标水平位置与原水平位置之差
+    bestPlayWay->value=0;//初始化最佳估值
+    bestPlayWay->priority=-10000;//初始化最佳优先级
+	nowPlayWay.boxX=manager->NowboxX;nowPlayWay.boxY=manager->NowboxY;//记录原坐标
+	memcpy(nowPlayWay.pool,manager->pool,16*sizeof(bool));//存储原游戏池
+	
+	switch(manager->NowboxShape){
+		case 0: case 5: case 6:nowPlayWay.rotateFrequency=2;break;//I型方块,Z型方块,S型方块,有两种旋转状态
+		case 1: case 3: case 4:nowPlayWay.rotateFrequency=4;break;//T型方块,L型方块,J型方块,有两种旋转状态
+		case 2: nowPlayWay.rotateFrequency=1;break;//O型方块,有一种旋转状态
+		default: break;
+    }
+    for(;manager->NowboxY<poolHidth-1;manager->NowboxY++){
+        for(manager->NowboxX=1;manager->NowboxX<poolWidth-1;manager->NowboxX++){          
+            for(int k=0;k<nowPlayWay.rotateFrequency;k++){
+                rotatePoolTetris(manager,0,1);//旋转,不进行旋转碰撞检测;放止manager->NowboxX的值被改变
+                if(!checkCollision(manager,0)){//碰撞检测;返回1为碰撞,0为没碰撞
+                    manager->NowboxY++;//将列坐标下移,检测是否落地,有碰撞为落地,无碰撞为没落地
+                    if(checkCollision(manager,0)){
+                        manager->NowboxY--;//返回原列坐标
+                        memcpy(&backM,manager,sizeof(gameManager));//再次对游戏数据备份
+                        memset(nowPlayWay.saveMove,0,sizeof(nowPlayWay.saveMove));//初始化移动路径 
+                        memset(nowPlayWay.moveWay,0,sizeof(nowPlayWay.moveWay));//初始化AI操作路径  
+                        nowPlayWay.saveMoveX[backM.NowboxY]=backM.NowboxX;
+                        if(routing(&backM,&nowPlayWay,0)){//backM里存储目标地址,nowPlayWay存储原地址
+							memcpy(&backM,manager,sizeof(gameManager));//再次对游戏数据备份
+                            nowPlayWay.value=100000+evaluate(&backM);//进行估值
+                          //  printf("%d ",nowPlayWay.value);
+                            
+                            if(bestPlayWay->value<nowPlayWay.value){//比较权值
+                                memcpy(bestPlayWay,&nowPlayWay,sizeof(autoPlayWay));//将权值较高的复制到bestPlayWay
+                            }
+                            else if(bestPlayWay->value==nowPlayWay.value){//如果权值相同,比较优先级
+                                deltaX=manager->NowboxX-nowPlayWay.boxX;//方块目标水平位置与原水平位置之差
+                                if(deltaX>0)//落于右侧的摆法
+                                    nowPlayWay.priority=100*deltaX+k;//100 * 水平平移格子数 + 旋转次数;
+                                else //落于左侧的摆法
+                                    nowPlayWay.priority=100*(-deltaX)+10+k;//100 * 水平平移格子数 + 10 + 旋转次数;
+                                if(nowPlayWay.priority>bestPlayWay->priority)//优先级比较
+                                    memcpy(bestPlayWay,&nowPlayWay,sizeof(autoPlayWay));//将权值较高的复制到bestPlayWay                         
+                            }
+						}
+                    }
+                    else manager->NowboxY--;//返回原列坐标
+                }    
+            }
+        }
+    }
+}
+void changeMoveWay(const gameManager *manager,autoPlayWay *bestPlayWay){//处理改变移动路径
+	static gameManager backManager;
+	memcpy(&backManager,manager,sizeof(gameManager));//虚拟游戏数据
+	existencePlace(&backManager,bestPlayWay);//AI;方块的存在位置
+	
+	int i=0,j=0;
+//	int m;
+	int backMoveWay[100];
+
+	
+	i=1;
+	j=2;
+	if(bestPlayWay->moveWay[1]==80){//对移动路径进行落地优化
+		bestPlayWay->moveWay[1]=32;
+		
+		while(bestPlayWay->moveWay[++i]==80);
+		while(bestPlayWay->moveWay[i]){
+			bestPlayWay->moveWay[j]=bestPlayWay->moveWay[i];
+			++i;++j;
+		}
+	bestPlayWay->moveWay[j]=0;
+	}
+
+	memcpy(&backMoveWay,bestPlayWay->moveWay,100*sizeof(int));//复制移动路径数据
+	i=0;j=0;
+	while(backMoveWay[++i]);//到达移动路径末端
+
+    while(backMoveWay[--i]){//对移动路径进行修改,还原
+        if(backMoveWay[i]==9)//解析旋转
+            bestPlayWay->moveWay[j]=72;
+        else 
+            bestPlayWay->moveWay[j]=backMoveWay[i];
+		j++;
+    }
+	bestPlayWay->moveWay[j]=0;
+}
+void autoPlay(gameManager *manager,gameMainData *mainData){//挂载AI
+	autoPlayWay PlayWay;
+
+	while(manager->gameDead){
+		changeMoveWay(manager,&PlayWay);
+		int i=0;
+		while(PlayWay.moveWay[i]){
+			keyControl(manager,PlayWay.moveWay[i],mainData); // 按键
+			Sleep(200);
+			i++;
+		}
+	
+	}
+ /*   for(int m=0;m<100;m++)
+		printf("%d_",PlayWay.moveWay[m]);
+	getch();   */
+    
+
+    
+}
+
+
+void easyExistencePlace(gameManager *manager,autoPlayWay *bestPlayWay){//简单AI寻址
+    gameManager backManager;
+    autoPlayWay nowPlayWay;
+    int deltaX;//方块目标水平位置与原水平位置之差
+    int k;
+    bestPlayWay->value=0;//初始化最佳估值
+    bestPlayWay->priority=-10000;//初始化最佳优先级
+	nowPlayWay.boxX=manager->NowboxX;nowPlayWay.boxY=manager->NowboxY;//记录原坐标
+    memcpy(nowPlayWay.pool,manager->pool,16*sizeof(bool));//存储原游戏池
+    
+	switch(manager->NowboxShape){
+		case 0: case 5: case 6:nowPlayWay.rotateFrequency=2;break;//I型方块,Z型方块,S型方块,有两种旋转状态
+		case 1: case 3: case 4:nowPlayWay.rotateFrequency=4;break;//T型方块,L型方块,J型方块,有两种旋转状态
+		case 2: nowPlayWay.rotateFrequency=1;break;//O型方块,有一种旋转状态
+		default: break;
+    }
+    for(int i=0;i<nowPlayWay.rotateFrequency;i++){// 尝试各种旋转状态      
+        for(int j=1;j<poolWidth-1;j++){// 尝试每一列
+            memcpy(&backManager,manager,sizeof(gameManager));//虚拟游戏数据
+            backManager.NowboxX=j;//列坐标
+            for(k=0;k<i;k++){
+                nowPlayWay.moveWay[k]=72;
+                rotatePoolTetris(manager,0,1);//旋转,进行旋转碰撞检测;放止manager->NowboxX的值被改变
+            }
+            deltaX=j-nowPlayWay.boxX;//方块目标水平位置与原水平位置之差
+            manager->NowboxX=j;
+            if(deltaX>0){
+                for(int m=0;m<deltaX;m++){
+                    
+                }
+            }
+        
+        }
+    
+    
+    }
+    
+    
+    
+    
+    
+
+}
+void easyAI(gameManager *manager,gameMainData *mainData){//临时简单AI
+    autoPlayWay PlayWay;
+	while(manager->gameDead){
+		easyExistencePlace(manager,&PlayWay);
+		int i=0;
+		while(PlayWay.moveWay[i]){
+			keyControl(manager,PlayWay.moveWay[i],mainData); // 按键
+			Sleep(200);
+			i++;
+		}
+	
+	}
+
+}
+
+
 HWND GetConsoleHwnd(void){// 获取控制台窗口句柄
 	#define MY_BUFSIZE 1024 // Buffer size for console window titles.
 	HWND hwndFound; // This is what is returned to the caller.
